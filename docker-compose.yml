@@ -45,27 +45,50 @@ services:
       - postgres_data_2:/var/lib/postgresql/data
       - ./config/postgres/slave.conf:/etc/postgresql/postgresql.conf
       - ./config/postgres/slave-init.sql:/docker-entrypoint-initdb.d/01-slave-init.sql
+      - ./config/postgres/pg_hba.conf:/etc/postgresql/pg_hba.conf
       - ./config/postgres/.pgpass:/var/lib/postgresql/.pgpass
     command:
       - bash
       - -c
       - |
         set -e
+
         echo "Waiting for master to be ready..."
+
         for i in {1..30}; do
           if pg_isready -h postgres-server1 -p 5432 -U postgres; then
             echo "Master is ready!"
             break
           fi
-          echo "Attempt $$i: Master not ready, waiting..."
+
+          echo "Attempt $i: Master not ready, waiting..."
           sleep 2
         done
+
         chmod 600 /var/lib/postgresql/.pgpass
         chown postgres:postgres /var/lib/postgresql/.pgpass
+
         echo "Starting base backup..."
-        pg_basebackup -h postgres-server1 -D /var/lib/postgresql/data/standby -U replicator -v -P
+
+        # Ensure standby data directory is empty before base backup
+        if [ -d /var/lib/postgresql/data/standby ] && [ "$(ls -A /var/lib/postgresql/data/standby)" ]; then
+          echo "Cleaning existing standby directory..."
+          rm -rf /var/lib/postgresql/data/standby/* || true
+        fi
+
+        /usr/local/bin/gosu postgres pg_basebackup \
+          -h postgres-server1 \
+          -D /var/lib/postgresql/data/standby \
+          -U replicator \
+          -v \
+          -P
+
+        # Ensure correct ownership after base backup
+        chown -R postgres:postgres /var/lib/postgresql/data/standby || true
+
         echo "Starting PostgreSQL in standby mode..."
-        exec postgres -c config_file=/etc/postgresql/postgresql.conf
+
+        exec /usr/local/bin/gosu postgres postgres -c config_file=/etc/postgresql/postgresql.conf
     depends_on:
       postgres-server1:
         condition: service_healthy
